@@ -9,8 +9,10 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  base: "./", // Use relative paths for Chrome extension
   build: {
     outDir: "dist",
+    minify: false, // Easier debugging
     rollupOptions: {
       input: {
         popup: path.resolve(__dirname, "index.html"),
