@@ -1,0 +1,61 @@
+{
+  "name": "QaReport",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The URL that was scanned"
+    },
+    "overall_score": {
+      "type": "number",
+      "description": "Overall QA score (0-100)"
+    },
+    "seo_score": {
+      "type": "number",
+      "description": "SEO category score"
+    },
+    "accessibility_score": {
+      "type": "number",
+      "description": "Accessibility category score"
+    },
+    "performance_score": {
+      "type": "number",
+      "description": "Performance category score"
+    },
+    "security_score": {
+      "type": "number",
+      "description": "Security category score"
+    },
+    "content_score": {
+      "type": "number",
+      "description": "Content quality score"
+    },
+    "mobile_score": {
+      "type": "number",
+      "description": "Mobile-friendliness score"
+    },
+    "best_practices_score": {
+      "type": "number",
+      "description": "Best practices score"
+    },
+    "report_data": {
+      "type": "object",
+      "description": "Full scan report JSON"
+    },
+    "total_issues": {
+      "type": "integer",
+      "description": "Total number of issues found"
+    },
+    "critical_issues": {
+      "type": "integer",
+      "description": "Number of critical issues"
+    },
+    "scanned_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the scan was performed"
+    }
+  },
+  "required": ["url", "overall_score", "report_data", "scanned_at"]
+}
