@@ -15,21 +15,35 @@ export default function App() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error("No active tab found");
 
-      // Inject content script into the page
+      // Inject content script as a function - works better with strict CSP
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ["content-script.js"],
+        func: () => {
+          // This function runs in the context of the page
+          if (typeof window.qaScannerScan === 'function') {
+            return window.qaScannerScan();
+          }
+          throw new Error("Content script not loaded. Please refresh the page and try again.");
+        },
+      }).then((results) => {
+        if (results && results[0] && results[0].result) {
+          setReport(results[0].result);
+        } else {
+          throw new Error("Scan returned no results");
+        }
+      }).catch((err) => {
+        // If function injection fails, try file injection
+        return chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ["content-script.js"],
+        }).then(() => {
+          // Wait a moment then try to call the function
+          return new Promise(resolve => setTimeout(resolve, 200));
+        }).then(() => {
+          return chrome.tabs.sendMessage(tab.id, { action: "scan" });
+        });
       });
 
-      // Wait a moment for injection then send scan message
-      await new Promise(r => setTimeout(r, 100));
-      
-      const response = await chrome.tabs.sendMessage(tab.id, { action: "scan" });
-      if (response) {
-        setReport(response);
-      } else {
-        throw new Error("Scan failed - no response from page");
-      }
     } catch (err) {
       console.error("Scan error:", err);
       setError(err.message || "Failed to scan page. Try refreshing the page first.");
@@ -76,6 +90,9 @@ export default function App() {
           <div>
             <p className="text-sm text-destructive font-medium">Scan failed</p>
             <p className="text-xs text-destructive/80 mt-1">{error}</p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Tip: Refresh the page and try again. For Wix sites, make sure you're on the published version.
+            </p>
           </div>
         </div>
       )}
@@ -85,6 +102,7 @@ export default function App() {
         <div className="p-8 flex flex-col items-center gap-3">
           <RefreshCw className="w-6 h-6 text-primary animate-spin" />
           <p className="text-sm text-muted-foreground">Analyzing page...</p>
+          <p className="text-xs text-muted-foreground">Checking SEO, accessibility, performance, security</p>
         </div>
       )}
 
@@ -100,6 +118,12 @@ export default function App() {
               Get instant analysis for SEO, accessibility, performance, security, and more
             </p>
           </div>
+          <button
+            onClick={handleScan}
+            className="mt-2 text-xs bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-md font-medium"
+          >
+            Start Scan
+          </button>
         </div>
       )}
 

@@ -1,14 +1,7 @@
 // Content script - runs on every page, responds to scan requests from popup
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "scan") {
-    const report = scanPage();
-    sendResponse(report);
-  }
-  return true; // keep channel open for async response
-});
-
-function scanPage() {
+// Store scan function globally so we can call it from message handler
+window.qaScannerScan = function() {
   const url = window.location.href;
   const doc = document;
 
@@ -23,6 +16,25 @@ function scanPage() {
     mobile: scanMobile(doc),
     bestPractices: scanBestPractices(doc),
   };
+};
+
+// Listen for messages from popup
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "scan") {
+    try {
+      // Call the global scan function
+      const report = window.qaScannerScan();
+      sendResponse({ success: true, report });
+    } catch (error) {
+      sendResponse({ success: false, error: error.message });
+    }
+  }
+  return true;
+});
+
+// Also expose scan function globally for direct calling
+if (typeof window !== 'undefined') {
+  window.qaScannerReady = true;
 }
 
 // ─── SEO ───────────────────────────────────────────────────────
@@ -121,6 +133,15 @@ function scanSEO(doc) {
     issues.push({ severity: "warning", message: "Page is set to noindex" });
   }
 
+  // Wix-specific checks
+  const isWix = doc.querySelector('[data-wix-id]') || doc.URL.includes('.wixsite.com') || doc.URL.includes('.wix.com');
+  if (isWix) {
+    passes.push("Wix site detected");
+    // Wix typically handles a lot of SEO automatically
+    const wixSeoPanel = doc.querySelector('[data-wix-seo]');
+    if (wixSeoPanel) passes.push("Wix SEO panel detected");
+  }
+
   return { issues, passes, score: calcScore(issues) };
 }
 
@@ -139,7 +160,7 @@ function scanAccessibility(doc) {
   if (emptyAlt.length > 5) issues.push({ severity: "info", message: `${emptyAlt.length} images with empty alt (ok if decorative)` });
 
   // Form labels
-  const inputs = doc.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='button']), textarea, select");
+  const inputs = doc.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']), textarea, select");
   let unlabeled = 0;
   inputs.forEach((input) => {
     const id = input.id;
@@ -158,7 +179,8 @@ function scanAccessibility(doc) {
     const text = btn.textContent.trim();
     const ariaLabel = btn.getAttribute("aria-label") || btn.getAttribute("aria-labelledby");
     const title = btn.getAttribute("title");
-    if (!text && !ariaLabel && !title) emptyButtons++;
+    const icon = btn.querySelector("svg, img");
+    if (!text && !ariaLabel && !title && !icon) emptyButtons++;
   });
   if (emptyButtons > 0) issues.push({ severity: "warning", message: `${emptyButtons} button(s) without accessible text` });
   else if (buttons.length > 0) passes.push(`All ${buttons.length} buttons have accessible text`);
@@ -170,7 +192,8 @@ function scanAccessibility(doc) {
     const text = a.textContent.trim();
     const ariaLabel = a.getAttribute("aria-label");
     const img = a.querySelector("img[alt]");
-    if (!text && !ariaLabel && !img) emptyLinks++;
+    const icon = a.querySelector("svg");
+    if (!text && !ariaLabel && !img && !icon) emptyLinks++;
   });
   if (emptyLinks > 0) issues.push({ severity: "warning", message: `${emptyLinks} link(s) without accessible text` });
 
@@ -184,19 +207,18 @@ function scanAccessibility(doc) {
   if (!skipLink) issues.push({ severity: "info", message: "No skip navigation link found" });
   else passes.push("Skip navigation link present");
 
-  // Color contrast (basic check - inline styles with small font)
-  // This is limited without computed styles but we can flag obvious issues
-  const smallText = doc.querySelectorAll("small, .text-xs, .text-sm");
-  if (smallText.length > 20) issues.push({ severity: "info", message: `${smallText.length} small text elements — verify contrast ratio meets WCAG AA (4.5:1)` });
-
   // Tabindex
   const positiveTabindex = doc.querySelectorAll("[tabindex]");
   const badTabindex = Array.from(positiveTabindex).filter((el) => parseInt(el.getAttribute("tabindex")) > 0);
   if (badTabindex.length > 0) issues.push({ severity: "warning", message: `${badTabindex.length} element(s) with positive tabindex (disrupts natural tab order)` });
 
-  // Focus visible
-  const focusStyles = doc.querySelectorAll("style, link[rel='stylesheet']");
-  passes.push(`${focusStyles.length} stylesheets loaded (manual focus visibility check recommended)`);
+  // Wix-specific accessibility
+  const isWix = doc.querySelector('[data-wix-id]') || doc.URL.includes('.wixsite.com') || doc.URL.includes('.wix.com');
+  if (isWix) {
+    // Wix has some accessibility features built-in
+    const wixAccessibility = doc.querySelector('[data-wix-a11y]');
+    if (wixAccessibility) passes.push("Wix accessibility features detected");
+  }
 
   return { issues, passes, score: calcScore(issues) };
 }
@@ -207,13 +229,13 @@ function scanPerformance(doc) {
   const issues = [];
   const passes = [];
 
-  // Image sizes (check for large images without width/height)
+  // Image sizes
   const images = doc.querySelectorAll("img");
   let noSize = 0;
   let noLazy = 0;
   let oversized = 0;
   images.forEach((img, i) => {
-    if (!img.width && !img.height && !img.style.width && !img.getAttribute("width")) noSize++;
+    if (!img.width && !img.height && !img.style.width && !img.getAttribute("width") && !img.getAttribute("height")) noSize++;
     if (i > 2 && !img.loading && img.loading !== "lazy") noLazy++;
     if (img.naturalWidth > 2000) oversized++;
   });
@@ -251,36 +273,38 @@ function scanPerformance(doc) {
   let maxDepth = 0;
   function getDepth(el, depth) {
     if (depth > maxDepth) maxDepth = depth;
-    if (depth < 32) { // prevent stack overflow
+    if (depth < 32) {
       for (const child of el.children) getDepth(child, depth + 1);
     }
   }
-  getDepth(doc.body, 0);
-  if (maxDepth > 15) issues.push({ severity: "info", message: `Deep DOM nesting (${maxDepth} levels deep)` });
-  else passes.push(`DOM depth is fine (${maxDepth} levels)`);
+  if (doc.body) {
+    getDepth(doc.body, 0);
+    if (maxDepth > 15) issues.push({ severity: "info", message: `Deep DOM nesting (${maxDepth} levels deep)` });
+    else passes.push(`DOM depth is fine (${maxDepth} levels)`);
+  }
 
   // Preload / prefetch hints
   const preloads = doc.querySelectorAll('link[rel="preload"], link[rel="prefetch"], link[rel="preconnect"]');
   if (preloads.length > 0) passes.push(`${preloads.length} resource hints (preload/prefetch/preconnect)`);
   else issues.push({ severity: "info", message: "No resource hints found (preload/prefetch/preconnect)" });
 
-  // Web fonts
-  const fontLinks = doc.querySelectorAll('link[href*="fonts"], link[href*="font"]');
-  const fontFaces = doc.querySelectorAll("style");
-  let fontFaceCount = 0;
-  fontFaces.forEach((s) => { fontFaceCount += (s.textContent.match(/@font-face/g) || []).length; });
-  if (fontLinks.length + fontFaceCount > 5) {
-    issues.push({ severity: "info", message: `${fontLinks.length + fontFaceCount} font sources detected — consider reducing` });
-  }
-
   // Third-party scripts
   const thirdParty = Array.from(scripts).filter((s) => {
-    try { return new URL(s.src).hostname !== window.location.hostname; } catch { return false; }
+    try { return s.src && new URL(s.src).hostname !== window.location.hostname; } catch { return false; }
   });
   if (thirdParty.length > 10) {
     issues.push({ severity: "warning", message: `${thirdParty.length} third-party scripts loaded` });
   }
   passes.push(`${thirdParty.length} third-party scripts`);
+
+  // Wix-specific performance
+  const isWix = doc.querySelector('[data-wix-id]') || doc.URL.includes('.wixsite.com') || doc.URL.includes('.wix.com');
+  if (isWix) {
+    passes.push("Wix site - performance optimizations handled by Wix");
+    // Check for Wix optimization features
+    const wixStatic = doc.querySelector('script[src*="static.wixstatic.com"]');
+    if (wixStatic) passes.push("Wix static CDN detected");
+  }
 
   return { issues, passes, score: calcScore(issues) };
 }
@@ -320,7 +344,7 @@ function scanSecurity(doc) {
     passes.push("All target=\"_blank\" links have rel=\"noopener\"");
   }
 
-  // Content Security Policy (check meta tag)
+  // Content Security Policy
   const csp = doc.querySelector('meta[http-equiv="Content-Security-Policy"]');
   if (!csp) issues.push({ severity: "info", message: "No Content Security Policy meta tag (may be set via header)" });
   else passes.push("Content Security Policy meta tag found");
@@ -340,7 +364,7 @@ function scanSecurity(doc) {
   });
   if (insecureForms > 0) issues.push({ severity: "critical", message: `${insecureForms} form(s) submit to HTTP (insecure)` });
 
-  // Password inputs without autocomplete
+  // Password inputs
   const pwInputs = doc.querySelectorAll('input[type="password"]');
   pwInputs.forEach((input) => {
     if (!input.getAttribute("autocomplete")) {
@@ -364,7 +388,7 @@ function scanContent(doc) {
   else if (wordCount < 300) issues.push({ severity: "info", message: `Thin content (${wordCount} words — consider 300+ for SEO)` });
   else passes.push(`Good content length (${wordCount} words)`);
 
-  // Broken image detection (images that failed to load)
+  // Broken image detection
   const images = doc.querySelectorAll("img");
   let brokenImages = 0;
   images.forEach((img) => {
@@ -401,6 +425,18 @@ function scanContent(doc) {
   if (!favicon) issues.push({ severity: "warning", message: "No favicon found" });
   else passes.push("Favicon present");
 
+  // Wix-specific content
+  const isWix = doc.querySelector('[data-wix-id]') || doc.URL.includes('.wixsite.com') || doc.URL.includes('.wix.com');
+  if (isWix) {
+    // Wix typically handles SEO-friendly URLs
+    const wixUrl = doc.URL;
+    if (wixUrl.includes('/~') || wixUrl.includes('?__rc=')) {
+      issues.push({ severity: "info", message: "Wix URL may not be SEO-friendly (contains tracking params)" });
+    } else {
+      passes.push("Wix SEO-friendly URL structure");
+    }
+  }
+
   return { issues, passes, score: calcScore(issues) };
 }
 
@@ -426,7 +462,7 @@ function scanMobile(doc) {
     }
   }
 
-  // Touch targets (buttons/links that are too small)
+  // Touch targets
   const clickables = doc.querySelectorAll("a, button, input, select, textarea");
   let tooSmall = 0;
   clickables.forEach((el) => {
@@ -476,15 +512,13 @@ function scanBestPractices(doc) {
   if (!charset) issues.push({ severity: "warning", message: "Missing charset declaration" });
   else passes.push(`Charset: ${charset.getAttribute("charset")}`);
 
-  // Console errors (can't directly access but can check for common issues)
-  
   // Deprecated HTML tags
   const deprecated = doc.querySelectorAll("font, center, marquee, blink, big, strike, tt, frame, frameset, applet");
   if (deprecated.length > 0) {
     issues.push({ severity: "warning", message: `${deprecated.length} deprecated HTML element(s) found` });
   }
 
-  // HTML validation basics
+  // Empty tags
   const emptyTags = doc.querySelectorAll("p:empty, div:empty, span:empty, h1:empty, h2:empty, h3:empty");
   if (emptyTags.length > 10) {
     issues.push({ severity: "info", message: `${emptyTags.length} empty HTML elements (cleanup recommended)` });
@@ -495,7 +529,7 @@ function scanBestPractices(doc) {
   if (!printCSS) issues.push({ severity: "info", message: "No print stylesheet" });
   else passes.push("Print stylesheet present");
 
-  // 404 page hint (check if body has common 404 patterns)
+  // 404 detection
   const bodyText = doc.body?.innerText?.toLowerCase() || "";
   if (bodyText.includes("404") && bodyText.includes("not found")) {
     issues.push({ severity: "critical", message: "Page appears to be a 404 error page" });
@@ -510,6 +544,16 @@ function scanBestPractices(doc) {
   const touchIcon = doc.querySelector('link[rel="apple-touch-icon"]');
   if (!touchIcon) issues.push({ severity: "info", message: "No Apple touch icon" });
   else passes.push("Apple touch icon present");
+
+  // Wix-specific best practices
+  const isWix = doc.querySelector('[data-wix-id]') || doc.URL.includes('.wixsite.com') || doc.URL.includes('.wix.com');
+  if (isWix) {
+    passes.push("Wix site - managed platform");
+    // Check for Wix custom domain
+    if (!doc.URL.includes('.wixsite.com') && !doc.URL.includes('.wix.com')) {
+      passes.push("Custom domain detected (good for SEO)");
+    }
+  }
 
   return { issues, passes, score: calcScore(issues) };
 }
